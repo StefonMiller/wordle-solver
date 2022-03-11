@@ -1,12 +1,13 @@
-from os.path import exists
 import pandas as pd
 import json
 from seleniumbase import BaseCase
+import datetime as dt
+import requests
+import re
+import tweepy
 
-# Check if the file containing preprocessed words exists
-file_exists = exists('data/processed_words.json')
         
-class Game:  
+class Game(BaseCase):  
     def __init__(self, gu = None):
         # Number of guesses left
         self.guesses = 6
@@ -18,6 +19,8 @@ class Game:
         self.correct_letters = {}
         # Dataframe of possible guesses. Initially all possible answers
         self.possible_guesses = gu
+        # Filter out any guesses that have been used
+        self.possible_guesses = self.possible_guesses[self.possible_guesses['used'] == False]
     
     def guess(self):
         # Get the current word in the df with the highest score based on character frequency 
@@ -76,8 +79,6 @@ class Game:
                 self.possible_guesses = self.possible_guesses[self.possible_guesses['word'].str.contains(k)]
                 self.possible_guesses = self.possible_guesses[self.possible_guesses['word'].str[pos] != k]
 
-
-
 def compute_words():
     words = []
     freq_dict = {}
@@ -105,6 +106,22 @@ def compute_words():
         freq_dict[k] = v / total_characters
     
     ans = []
+
+    # Get the list of previous answers as they will not be used anymore
+    # Calculate number of days since first Wordle answer
+    start_date = dt.date(2021, 6, 19)
+    end_date = dt.date.today()
+    days = (end_date - start_date).days
+
+    # Get first N wordle answers
+    # Get the wordle js file
+    answers = requests.get('https://www.nytimes.com/games/wordle/main.bfba912f.js')
+    # Get the list of future answers and take the first N words, where N is the current day
+    result = re.search(r'var Ma=\[(.*)\],Oa=', answers.text)
+    answers = result.group(1).replace('\"', '').split(',')
+
+    answers = answers[:days]
+
     # Create the json file and write our results for each word to the file
     with open('data/processed_words.json', 'w') as f:
         # Loop through each answer
@@ -119,26 +136,26 @@ def compute_words():
                 temp_chars.append(char)
             temp_set = set(temp_chars)
             temp_val = temp_val * len(temp_set) / len(temp_chars)
-            # Write the word, total character frequency, and list of characters to the json file
-            ans.append({'word': word, 'value': temp_val, 'characters': temp_chars})
+            used = word in answers
+            # Write the word, total character frequency, list of characters, and if they were previous guesses to the json file
+            ans.append({'word': word, 'value': temp_val, 'characters': temp_chars, 'used': used})
         json.dump(ans, f)
     f.close()
 
 
 # Class using Selenium and PyTest to interact with the Wordle website
 class WordleTests(BaseCase):
-
     # Game logic and interaction
     def test_wordle(self):
+        self.res = False
         # Open wordle website and close tutorial
         self.open("https://www.nytimes.com/games/wordle/index.html")
         self.click("game-app::shadow game-modal::shadow game-icon")
         # Store base path to keyboard element
         keyboard_base = "game-app::shadow game-keyboard::shadow "
 
-        # If the precomputed word file does not exist, create it
-        if not file_exists:
-            compute_words()
+        # Update precomputed list of words and values
+        compute_words()
 
         # Read json file to dataframe and sort by the computed score based on character frequency
         df = pd.read_json('data/processed_words.json')
@@ -147,11 +164,13 @@ class WordleTests(BaseCase):
         # Create a game object using a copy of the dataframe
         game = Game(gu=df.copy())
 
+        guesses = []
+
         # Loop until out of guesses or the puzzle is solved
         while not game.is_over():
             # Take a guess based on current known good/bad letters
             guess = game.guess()
-
+            guesses.append(guess.upper())
             # For each letter in the computed guess, enter it into the website
             for letter in guess:
                 button = 'button[data-key="%s"]' % letter
@@ -178,7 +197,8 @@ class WordleTests(BaseCase):
             # If all letters are evaluated as correct, we have the word
             if letter_status.count("correct") == 5:
                 print(f'Correct word is {guess}. Found in {6 - game.guesses} attempts')
-                return True
+                self.res = True
+                break
             else:
                 # If we don't have the correct word, loop through each character
                 for i in range(0, len(letter_status)):
@@ -197,5 +217,35 @@ class WordleTests(BaseCase):
                 game.evaluate_guess(working_guess, correct_letters)
                 game.filter_guesses()
         # If we reach the end of the loop, we were unable to solve the puzzle
-        print('Unable to solve puzzle')
-        return False
+        self.maximize_window()
+        # Wait for stats window to show up before closing it
+        self.wait_for_element('game-app::shadow game-modal::shadow game-icon')
+        self.click('game-app::shadow game-modal::shadow game-icon')
+        self.wait(1)
+        # SS the result of today's puzzle
+        self.save_screenshot(name='out.png')
+        
+        # Upload results to Twitter
+        with open('auth.json') as f:
+            dict = json.load(f)
+        
+        auth = tweepy.OAuthHandler(
+            dict['client_id'],
+            dict['client_secret']
+        )
+        auth.set_access_token(
+            dict['access_token'],
+            dict['access_secret']
+        )
+        api = tweepy.API(auth)
+        media = api.media_upload("out.png")
+        temp_str = '->'.join(guesses)
+        if self.res:
+            tweet = f'Wordle solution for {str(dt.date.today())}: {temp_str}'
+        else:
+            tweet = f'Wordle attempt for {str(dt.date.today())}: {temp_str}'
+        api.update_status(status=tweet, media_ids=[media.media_id])
+        return self.res
+
+
+
