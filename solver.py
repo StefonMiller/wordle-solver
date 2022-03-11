@@ -1,53 +1,62 @@
 from os.path import exists
 import pandas as pd
 import json
-import ast
-import random
-import requests
 from seleniumbase import BaseCase
 
+# Check if the file containing preprocessed words exists
 file_exists = exists('data/processed_words.json')
         
-
 class Game:  
     def __init__(self, gu = None):
+        # Number of guesses left
         self.guesses = 6
+        # Set of characters that don't appear in the correct word
         self.unused_letters = set()
+        # Working guess, an array of characters representing what we know so far about the word. 0's represent unknown characters
         self.current_guess = [0, 0, 0, 0, 0]
+        # Dictionary of used characters that are incorrect positions. Each character in the dict has an associated array containing all positions known to be not-good
         self.correct_letters = {}
+        # Dataframe of possible guesses. Initially all possible answers
         self.possible_guesses = gu
     
     def guess(self):
+        # Get the current word in the df with the highest score based on character frequency 
         curr_guess = self.possible_guesses.head(1)
         curr_word  = curr_guess['word'].values[0]
-        curr_value = curr_guess['value'].values[0]
         curr_chars = curr_guess['characters'].values[0]
-        # print(f'Guessing word \'{curr_word}\' with value {curr_value}')
+        # Decrement the number of guesses
         self.guesses = self.guesses - 1
+        # Add all characters in new guess to the set of unused characters. They will be removed if used when we evaluate our guess
         self.unused_letters.update(curr_chars)
         return curr_word
 
     def evaluate_guess(self, correct_pos, cl):
-        
+        # Update the current dict of correct letters
         for k, v in cl.items():
+            # If the current letter is already known to be correct, update the list of incorrect positions with the current one
             if k in self.correct_letters:
                 for val in v:
                     self.correct_letters[k].append(val)
+            # If the current letter isn't known to be correct, create a new entry for it in the dict
             else:
                 self.correct_letters[k] = v
             
+            # Remove any good letters from the set of unused letters
             self.unused_letters.remove(k)
         
+        # Update the current guess for the game with any new letters found to be in a correct position
         for i in range(0, len(correct_pos)):
             if correct_pos[i] != 0:
                 if self.current_guess[i] == 0:
                     self.current_guess[i] = correct_pos[i]
+                # Remove any letters found to be good from the set of unused letters
                 if correct_pos[i] in self.unused_letters:
                     self.unused_letters.remove(correct_pos[i])
         
-        # print(f'EVALUATION FOR GUESS {5-self.guesses}:\n\tWorking guess: {self.current_guess}\n\tCorrect letters in incorrect positions: {self.correct_letters}\n\tUnused letters: {self.unused_letters}')
+        # print(f'EVALUATION FOR GUESS {6-self.guesses}:\n\tWorking guess: {self.current_guess}\n\tCorrect letters in incorrect positions: {self.correct_letters}\n\tUnused letters: {self.unused_letters}')
 
     def is_over(self):
+        # Check if we are out of guesses
         return self.guesses <= 0
     
     def filter_guesses(self):
@@ -73,7 +82,7 @@ def compute_words():
     words = []
     freq_dict = {}
 
-    # Loop through each word in the answers file
+    # Compute frequency of each character in the set of possible Wordle answers
     with open('data/answers.txt') as f:
         for line in f:
             # Strip white spaces from lines
@@ -96,131 +105,97 @@ def compute_words():
         freq_dict[k] = v / total_characters
     
     ans = []
+    # Create the json file and write our results for each word to the file
     with open('data/processed_words.json', 'w') as f:
+        # Loop through each answer
         for word in words:
+            # Convert the current word into a list of characters
             chars= list(word)
             temp_val = 0
             temp_chars = []
+            # Each character has a % frequency in the total answer set. For each word, add up that score for each letter and write it to the file
             for char in chars:
                 temp_val = temp_val + freq_dict[char]
                 temp_chars.append(char)
             temp_set = set(temp_chars)
             temp_val = temp_val * len(temp_set) / len(temp_chars)
+            # Write the word, total character frequency, and list of characters to the json file
             ans.append({'word': word, 'value': temp_val, 'characters': temp_chars})
         json.dump(ans, f)
     f.close()
 
-def solve(word):
 
-    # Read json file to dataframe
-    df = pd.read_json('data/processed_words.json')
+# Class using Selenium and PyTest to interact with the Wordle website
+class WordleTests(BaseCase):
 
-    df = df.sort_values(by='value', ascending=False)
+    # Game logic and interaction
+    def test_wordle(self):
+        # Open wordle website and close tutorial
+        self.open("https://www.nytimes.com/games/wordle/index.html")
+        self.click("game-app::shadow game-modal::shadow game-icon")
+        # Store base path to keyboard element
+        keyboard_base = "game-app::shadow game-keyboard::shadow "
 
-    game = Game(gu=df.copy())
+        # If the precomputed word file does not exist, create it
+        if not file_exists:
+            compute_words()
 
-    while not game.is_over():
-        guess = game.guess()
-        # Correct letters in correct places
-        working_guess = [0, 0, 0, 0, 0]
-        # Correct letters in incorrect placse
-        correct_letters = {}
-        if guess == word:
-            return True
-        else:
-            for i in range(0, len(guess)):
-                if guess[i] == word[i]:
-                    working_guess[i] = guess[i]
-                elif guess[i] in word:
-                    if guess[i] in correct_letters:
-                        correct_letters[guess[i]].append(i)        
-                    else:
-                        correct_letters[guess[i]] = [i]
-            game.evaluate_guess(working_guess, correct_letters)
-            game.filter_guesses()
-    
-    return False
+        # Read json file to dataframe and sort by the computed score based on character frequency
+        df = pd.read_json('data/processed_words.json')
+        df = df.sort_values(by='value', ascending=False)
 
+        # Create a game object using a copy of the dataframe
+        game = Game(gu=df.copy())
 
+        # Loop until out of guesses or the puzzle is solved
+        while not game.is_over():
+            # Take a guess based on current known good/bad letters
+            guess = game.guess()
 
-# TODO: Interface with site using selenium
+            # For each letter in the computed guess, enter it into the website
+            for letter in guess:
+                button = 'button[data-key="%s"]' % letter
+                self.click(keyboard_base + button)
+                button = 'button.one-and-a-half'
+            
+            # Click the enter button and wait for feedback on the current guess
+            self.click(keyboard_base + button)
+            row = 'game-app::shadow game-row[letters="%s"]::shadow ' % guess
+            tile = row + "game-tile:nth-of-type(%s)"
+            self.wait_for_element(tile % "5" + '::shadow [data-state*="e"]')
+            
+            # Add the feedback from our guess to the current game state
+            letter_status = []
+            for i in range(1, 6):
+                letter_eval = self.get_attribute(tile % str(i), "evaluation")
+                letter_status.append(letter_eval)
+            
+            # Correct letters in correct places
+            working_guess = [0, 0, 0, 0, 0]
+            # Correct letters in incorrect places
+            correct_letters = {}
 
-# class WordleTests(BaseCase):
-       
-
-#     def modify_word_list(self, word, letter_status):
-#         new_word_list = []
-#         correct_letters = []
-#         present_letters = []
-#         for i in range(len(word)):
-#             if letter_status[i] == "correct":
-#                 correct_letters.append(word[i])
-#                 for w in self.word_list:
-#                     if w[i] == word[i]:
-#                         new_word_list.append(w)
-#                 self.word_list = new_word_list
-#                 new_word_list = []
-#         for i in range(len(word)):
-#             if letter_status[i] == "present":
-#                 present_letters.append(word[i])
-#                 for w in self.word_list:
-#                     if word[i] in w and word[i] != w[i]:
-#                         new_word_list.append(w)
-#                 self.word_list = new_word_list
-#                 new_word_list = []
-#         for i in range(len(word)):
-#             if (
-#                 letter_status[i] == "absent"
-#                 and word[i] not in correct_letters
-#                 and word[i] not in present_letters
-#             ):
-#                 for w in self.word_list:
-#                     if word[i] not in w:
-#                         new_word_list.append(w)
-#                 self.word_list = new_word_list
-#                 new_word_list = []
-
-#     def test_wordle(self):
-#         self.open("https://www.nytimes.com/games/wordle/index.html")
-#         self.click("game-app::shadow game-modal::shadow game-icon")
-#         if not file_exists:
-#             compute_words()
-#         keyboard_base = "game-app::shadow game-keyboard::shadow "
-#         word = random.choice(self.word_list)
-#         total_attempts = 0
-#         success = False
-#         for attempt in range(6):
-#             total_attempts += 1
-#             word = random.choice(self.word_list)
-#             letters = []
-#             for letter in word:
-#                 letters.append(letter)
-#                 button = 'button[data-key="%s"]' % letter
-#                 self.click(keyboard_base + button)
-#             button = 'button.one-and-a-half'
-#             self.click(keyboard_base + button)
-#             row = 'game-app::shadow game-row[letters="%s"]::shadow ' % word
-#             tile = row + "game-tile:nth-of-type(%s)"
-#             self.wait_for_element(tile % "5" + '::shadow [data-state*="e"]')
-#             letter_status = []
-#             for i in range(1, 6):
-#                 letter_eval = self.get_attribute(tile % str(i), "evaluation")
-#                 letter_status.append(letter_eval)
-#             if letter_status.count("correct") == 5:
-#                 success = True
-#                 break
-#             self.word_list.remove(word)
-#             self.modify_word_list(word, letter_status)
-
-#         self.save_screenshot_to_logs()
-#         print('\nWord: "%s"\nAttempts: %s' % (word.upper(), total_attempts))
-#         if not success:
-#             self.fail("Unable to solve for the correct word in 6 attempts!")
-#         self.sleep(3)
-
-    
-    
-        
-
-
-
+            # If all letters are evaluated as correct, we have the word
+            if letter_status.count("correct") == 5:
+                print(f'Correct word is {guess}. Found in {6 - game.guesses} attempts')
+                return True
+            else:
+                # If we don't have the correct word, loop through each character
+                for i in range(0, len(letter_status)):
+                    # If the letter is correct, it is in the correct spot. Add it to our current working guess
+                    if letter_status[i] == 'correct':
+                        working_guess[i] = guess[i]
+                    # If the letter is present, it is a good letter but in the wrong spot
+                    elif letter_status[i] == 'present':
+                        # If we have already registered the letter as good, add it's current position to the list of incorrect positions for that letter
+                        if guess[i] in correct_letters:
+                            correct_letters[guess[i]].append(i)
+                        # If we have not registered the letter as good, add it and an array containing the current index to the dict of valid letters
+                        else:
+                            correct_letters[guess[i]] = [i]
+                # Update the game state with the feedback on our guess and then filter the df of possible guesses based on this new game state
+                game.evaluate_guess(working_guess, correct_letters)
+                game.filter_guesses()
+        # If we reach the end of the loop, we were unable to solve the puzzle
+        print('Unable to solve puzzle')
+        return False
