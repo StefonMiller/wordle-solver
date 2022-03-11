@@ -238,14 +238,18 @@ class WordleTests(BaseCase):
             dict['access_secret']
         )
         api = tweepy.API(auth)
-        media = api.media_upload("out.png")
         temp_str = '->'.join(guesses)
-        if self.res:
-            tweet = f'Wordle solution for {str(dt.date.today())}: {temp_str}'
-        else:
-            tweet = f'Wordle attempt for {str(dt.date.today())}: {temp_str}'
-        api.update_status(status=tweet, media_ids=[media.media_id])
-        return self.res
+        
+        past_tweet = api.user_timeline(screen_name='wordlebot7', count = 1)[0]
+        prev_date = re.search(r'for (.*): ', past_tweet.text).group(1)
+        # Only post a tweet if we haven't for today
+        if prev_date != str(dt.date.today()):
+            media = api.media_upload("out.png")
+            if self.res:
+                tweet = f'Wordle solution for {str(dt.date.today())}: {temp_str}'
+            else:
+                tweet = f'Wordle attempt for {str(dt.date.today())}: {temp_str}'
+            api.update_status(status=tweet, media_ids=[media.media_id])
 
 
 
